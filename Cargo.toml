@@ -1,0 +1,11 @@
+[package]
+name = "ld52"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bevy = "0.9.1"
+bevy_rapier2d = { version = "0.19.0", features = [ "enhanced-determinism", "wasm-bindgen" ] }
+bevy_asset_loader = { version = "0.14.1", features = [ "2d" ] }
+bevy_egui = "0.18"
+bevy-vfx-bag = "0.1.0"
