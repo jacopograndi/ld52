@@ -1,6 +1,11 @@
+use rand::{rngs::ThreadRng, Rng};
 use std::time::Duration;
 
-use bevy::{prelude::*, sprite::MaterialMesh2dBundle};
+use bevy::{
+    diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
+    prelude::*,
+    sprite::MaterialMesh2dBundle,
+};
 use bevy_asset_loader::prelude::*;
 use bevy_egui::{egui, EguiContext, EguiPlugin, EguiSettings};
 use bevy_rapier2d::prelude::*;
@@ -12,7 +17,7 @@ fn main() {
     App::new()
         .add_plugins(DefaultPlugins.set(WindowPlugin {
             window: WindowDescriptor {
-                width: 1200.0,
+                width: 700.0,
                 height: 700.0,
                 fit_canvas_to_parent: true,
                 ..default()
@@ -33,25 +38,25 @@ fn main() {
         .add_system_set(SystemSet::on_update(GameState::LevelLoading).with_system(setup_level))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(animate_sprite))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(block_color))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(bonk))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(movement))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(check_finish))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(finish_transition))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(show_level_progress))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(mass_increase))
         .add_system_set(SystemSet::on_exit(GameState::Gameplay).with_system(teardown_level))
         .add_system(mouse_pos)
-        .add_system(show_progress)
         .add_plugin(EguiPlugin)
         .insert_resource(Msaa { samples: 1 })
         .init_resource::<Info>()
         .init_resource::<MousePos>()
         .insert_resource(Progress {
-            current_level: "tutorial".to_string(),
+            current_level: 1,
             golden_apples: 0,
             level_complete: false,
             end_timer: Timer::from_seconds(5.0, TimerMode::Once),
             level_timer: Timer::from_seconds(20.0, TimerMode::Once),
+            num: 1,
         })
+        .insert_resource(ClearColor(Color::BLACK))
         //.add_plugin(BevyVfxBagPlugin) // This needs to be added for any effect to work
         //.add_plugin(ChromaticAberrationPlugin)
         .run();
@@ -87,6 +92,7 @@ fn place_block(commands: &mut Commands, block: Block) {
             },
             ..default()
         })
+        .insert(BlockBase)
         .insert(TransformBundle::from(Transform::from_translation(
             block.base_pos - Vec3::new(0.0, 0.0, 5.0),
         )));
@@ -120,20 +126,20 @@ fn place_block(commands: &mut Commands, block: Block) {
 fn setup_physics(mut commands: Commands, mut rapier_conf: ResMut<RapierConfiguration>) {
     rapier_conf.gravity = Vec2::new(0.0, 0.0);
     commands
-        .spawn(Collider::cuboid(1200.0, 50.0))
-        .insert(TransformBundle::from(Transform::from_xyz(0.0, 400.0, 0.0)));
+        .spawn(Collider::cuboid(700.0, 50.0))
+        .insert(TransformBundle::from(Transform::from_xyz(0.0, 340.0, 0.0)));
 
     commands
-        .spawn(Collider::cuboid(1200.0, 50.0))
-        .insert(TransformBundle::from(Transform::from_xyz(0.0, -400.0, 0.0)));
-
-    commands
-        .spawn(Collider::cuboid(50.0, 700.0))
-        .insert(TransformBundle::from(Transform::from_xyz(-650.0, 0.0, 0.0)));
+        .spawn(Collider::cuboid(700.0, 50.0))
+        .insert(TransformBundle::from(Transform::from_xyz(0.0, -340.0, 0.0)));
 
     commands
         .spawn(Collider::cuboid(50.0, 700.0))
-        .insert(TransformBundle::from(Transform::from_xyz(650.0, 0.0, 0.0)));
+        .insert(TransformBundle::from(Transform::from_xyz(-400.0, 0.0, 0.0)));
+
+    commands
+        .spawn(Collider::cuboid(50.0, 700.0))
+        .insert(TransformBundle::from(Transform::from_xyz(400.0, 0.0, 0.0)));
 }
 
 fn setup_egui(mut egui_context: ResMut<EguiContext>, mut egui_settings: ResMut<EguiSettings>) {
@@ -152,14 +158,17 @@ fn setup_egui(mut egui_context: ResMut<EguiContext>, mut egui_settings: ResMut<E
 fn setup_level(
     mut commands: Commands,
     my_assets: Res<GameAssets>,
-    info: Res<Info>,
+    mut info: ResMut<Info>,
     prog: Res<Progress>,
+    mut bg_color: ResMut<ClearColor>,
     mut state: ResMut<State<GameState>>,
 ) {
     let level = info.get_level(&prog);
     for block in level.blocks.iter() {
         place_block(&mut commands, block.clone());
     }
+
+    bg_color.0 = level.back_color.clone();
 
     commands
         .spawn(SpriteSheetBundle {
@@ -185,7 +194,7 @@ fn setup_level(
         })
         .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(ActiveEvents::CONTACT_FORCE_EVENTS)
-        .insert(AnimationState::Idle)
+        .insert(AnimationState::Walking)
         .insert(MainCharacter {
             dash_timer: Timer::from_seconds(1.0, TimerMode::Once),
         })
@@ -200,6 +209,7 @@ fn teardown_level(
     mut commands: Commands,
     query_blocks: Query<(Entity, &Block)>,
     query_main: Query<(Entity, &MainCharacter)>,
+    query_bases: Query<(Entity, &BlockBase)>,
 ) {
     for (ent, _) in query_blocks.iter() {
         commands.entity(ent).despawn();
@@ -207,72 +217,77 @@ fn teardown_level(
     for (ent, _) in query_main.iter() {
         commands.entity(ent).despawn();
     }
+    for (ent, _) in query_bases.iter() {
+        commands.entity(ent).despawn();
+    }
 }
 
-fn finish_transition(
+fn mass_increase(
+    mut main_char: Query<(&mut MainCharacter, &mut AdditionalMassProperties)>,
+    block_query: Query<(&Block, &Transform)>,
+    prog: Res<Progress>,
+) {
+    if let Ok((_, mut mass)) = main_char.get_single_mut() {
+        let sum: f32 = block_query
+            .iter()
+            .map(|(block, tr)| block.rel(tr.translation))
+            .sum();
+        *mass = AdditionalMassProperties::Mass(1.0 + sum * 2000.0);
+    }
+}
+
+fn check_finish(
     mut state: ResMut<State<GameState>>,
+    block_query: Query<(&Block, &Transform)>,
+    mut info: ResMut<Info>,
     mut prog: ResMut<Progress>,
-    info: Res<Info>,
     time: Res<Time>,
 ) {
-    let level = info.get_level(&prog);
-    if prog.level_complete {
+    if block_query.iter().count() == 0 {
+        return;
+    }
+    if !prog.level_complete {
+        let sum: f32 = block_query
+            .iter()
+            .map(|(block, tr)| block.rel(tr.translation))
+            .sum();
+        let level = info.get_level(&prog);
+        prog.level_timer.tick(time.delta());
+        if sum >= level.point_threshold || prog.level_timer.finished() {
+            prog.num += 1;
+            if !prog.level_timer.finished() {
+                prog.golden_apples += 1;
+            }
+            prog.level_complete = true;
+            prog.end_timer.reset();
+            /*
+            let next_level = (info
+                .levels
+                .iter()
+                .enumerate()
+                .find(|l| l.1.id == prog.current_level)
+                .unwrap()
+                .0
+                + 1)
+                % info.levels.len();
+            */
+            prog.current_level += 1;
+        }
+    } else {
         prog.end_timer.tick(time.delta());
         if prog.end_timer.finished() {
-            prog.level_complete = false;
-            prog.end_timer.reset();
+            let level = info.get_level(&prog);
             prog.level_timer.set_duration(level.duration);
             prog.level_timer.reset();
+            prog.level_complete = false;
             state.set(GameState::LevelLoading).ok();
         }
     }
 }
 
-fn check_finish(
-    block_query: Query<(&Block, &Transform)>,
-    info: Res<Info>,
-    mut prog: ResMut<Progress>,
-    time: Res<Time>,
-) {
-    if prog.level_complete || block_query.iter().count() == 0 {
-        return;
-    }
-    let sum: f32 = block_query
-        .iter()
-        .map(|(block, tr)| block.rel(tr.translation))
-        .sum();
-    let level = info.get_level(&prog);
-    prog.level_timer.tick(time.delta());
-    if sum >= level.point_threshold || prog.level_timer.finished() {
-        if !prog.level_timer.finished() {
-            prog.golden_apples += 1;
-        }
-        prog.level_complete = true;
-        let next_level = info
-            .levels
-            .iter()
-            .enumerate()
-            .find(|l| l.1.name == prog.current_level)
-            .unwrap()
-            .0
-            % info.levels.len();
-        prog.current_level = info.levels[next_level].name.clone();
-    }
-}
-
-fn show_progress(info: Res<Info>, prog: Res<Progress>, mut egui_context: ResMut<EguiContext>) {
-    egui::Window::new("Progress")
-        .title_bar(false)
-        .resizable(false)
-        .anchor(egui::Align2::RIGHT_TOP, egui::Vec2::splat(0.0))
-        .show(egui_context.ctx_mut(), |ui| {
-            ui.label(format!("{} Golden Apples", prog.golden_apples));
-        });
-}
-
 fn show_level_progress(
     block_query: Query<(&Block, &Transform)>,
-    info: Res<Info>,
+    mut info: ResMut<Info>,
     prog: Res<Progress>,
     mut egui_context: ResMut<EguiContext>,
 ) {
@@ -282,13 +297,22 @@ fn show_level_progress(
         .sum();
     let level = info.get_level(&prog);
     let progress = sum / level.point_threshold;
+    let col = level.color.as_rgba();
+    let color = egui::Color32::from_rgb(
+        (col.r() * 255.0) as i32 as u8,
+        (col.g() * 255.0) as i32 as u8,
+        (col.b() * 255.0) as i32 as u8,
+    );
     egui::Window::new("LevelProgress")
         .title_bar(false)
         .resizable(false)
         .anchor(egui::Align2::CENTER_BOTTOM, egui::Vec2::splat(0.0))
         .show(egui_context.ctx_mut(), |ui| {
+            ui.visuals_mut().selection.bg_fill = color;
             if progress < 1.0 && !prog.level_complete {
-                let progress_bar = egui::ProgressBar::new(progress).show_percentage();
+                let progress_bar = egui::ProgressBar::new(progress)
+                    .show_percentage()
+                    .text(format!("{:.0}% of level {}", progress * 100.0, prog.num));
                 ui.add(progress_bar);
             } else {
                 if !prog.level_timer.finished() {
@@ -296,6 +320,7 @@ fn show_level_progress(
                 } else {
                     ui.label("Not fast enough!");
                 }
+                ui.label(format!("You have {} golden apples.", prog.golden_apples));
             }
         });
     egui::Window::new("TimeProgress")
@@ -303,6 +328,8 @@ fn show_level_progress(
         .resizable(false)
         .anchor(egui::Align2::CENTER_TOP, egui::Vec2::splat(0.0))
         .show(egui_context.ctx_mut(), |ui| {
+            ui.visuals_mut().selection.bg_fill = color;
+
             let progress_bar =
                 egui::ProgressBar::new(1.0 - prog.level_timer.percent()).text("Time left");
             ui.add(progress_bar);
@@ -312,72 +339,128 @@ fn show_level_progress(
 fn block_color(mut block_query: Query<(&Block, &Transform, &mut Sprite)>) {
     for (block, tr, mut sprite) in block_query.iter_mut() {
         let amt = block.rel(tr.translation);
-        let lerp = block.color * (1.0 - amt) + Color::rgb(1.0, 0.4, 0.0) * amt;
+        let lerp = block.color * (1.0 - amt) + block.color_target * amt;
         sprite.color = lerp;
-    }
-}
-
-fn bonk(
-    mut collision_events: EventReader<ContactForceEvent>,
-    mut egui_context: ResMut<EguiContext>,
-) {
-    for force_event in collision_events.iter() {
-        if force_event.total_force_magnitude > 700.0 {
-            println!("{:?}", force_event);
-            egui::Window::new("AAA")
-                .title_bar(false)
-                .resizable(false)
-                .anchor(egui::Align2::LEFT_CENTER, egui::Vec2::splat(0.0))
-                .show(egui_context.ctx_mut(), |ui| {
-                    ui.label("lol");
-                });
-        };
     }
 }
 
 #[derive(Clone)]
 struct Level {
-    name: String,
+    id: u32,
     blocks: Vec<Block>,
     point_threshold: f32,
     spawnpoint: Vec3,
     duration: Duration,
+    back_color: Color,
+    color: Color,
+}
+
+#[derive(Clone)]
+struct Rect {
+    pos: Vec2,
+    size: Vec2,
+}
+
+#[derive(Clone)]
+struct Layout {
+    rects: Vec<Rect>,
+}
+
+impl Layout {
+    fn gen(mag: u32, mut rng: &mut ThreadRng) -> Layout {
+        let mut layout = Layout { rects: vec![] };
+        for i in 0..mag {
+            // generate random box size
+            let size = Vec2::new(rng.gen_range(20.0..60.0), rng.gen_range(20.0..60.0));
+
+            // select a direction (along x or y)
+            let dir = if rng.gen_bool(0.5) {
+                Vec2::new(1.0, 0.0)
+            } else {
+                Vec2::new(0.0, 1.0)
+            };
+
+            // generate a random offset from 0..max * 2
+            let mut maxvec = Vec2::new(0.0, 0.0);
+            for r in layout.rects.iter() {
+                maxvec.x = maxvec.x.max(r.pos.x + r.size.x);
+                maxvec.y = maxvec.y.max(r.pos.y + r.size.y);
+            }
+            let max = (maxvec * dir).length();
+            let off = dir
+                * if max > 0.0 {
+                    rng.gen_range(0.0..max)
+                } else {
+                    0.0
+                };
+
+            // move the box along other dir to not overlap the others
+            let rect = Rect {
+                pos: off * dir,
+                size,
+            };
+            let casted = layout.cast(&(dir * off), &dir, &rect);
+
+            layout.rects.push(casted);
+
+            // mirror along x and y
+        }
+        layout
+    }
+
+    fn intersects(&self, rect: &Rect) -> bool {
+        self.rects.iter().any(|r| {
+            r.pos.x < rect.pos.x + rect.size.x
+                && rect.size.x < r.pos.x + r.size.x
+                && r.pos.y < rect.pos.y + rect.size.y
+                && rect.size.y < r.pos.y + r.size.y
+        })
+    }
+
+    fn cast(&self, start: &Vec2, dir: &Vec2, rect: &Rect) -> Rect {
+        let mut pos = start.clone() + (dir.clone() * (self.rects.len() as f32 * 50.0));
+        for r in self.rects.iter() {
+            //r.pos * dir
+        }
+        Rect {
+            pos,
+            size: rect.size.clone(),
+        }
+    }
 }
 
 impl Level {
-    fn tutorial() -> Level {
-        let movable = Block::default();
-        let wall = Block {
-            base_size: Vec2::new(200.0, 200.0),
-            color: Color::DARK_GRAY,
-            base_color: Color::DARK_GRAY,
-            density: 0.0,
+    fn gen(num: u32) -> Level {
+        let mut rng = rand::thread_rng();
+        let hue: f32 = rng.gen_range(0.0..360.0);
+        let color = Color::hsl(hue, 1.0, 0.5);
+        let target_color = Color::hsl((hue + 137.0).clamp(0.0, 360.0), 1.0, 0.5);
+        let back_color = Color::hsl(0.0, 0.0, 0.1);
+        let movable = Block {
+            color,
+            base_size: Vec2::new(30.0, 30.0),
+            base_color: color * 0.7,
+            color_target: target_color,
             ..default()
         };
-        let mut blocks = vec![];
-        for i in 0..9 {
-            blocks.push(movable.mov(Vec2::new(100.0, -200.0 + 50.0 * i as f32)));
-            blocks.push(movable.mov(Vec2::new(-100.0, -200.0 + 50.0 * i as f32)));
-        }
-        for i in 0..8 {
-            blocks.push(movable.mov(Vec2::new(150.0, -175.0 + 50.0 * i as f32)));
-            blocks.push(movable.mov(Vec2::new(-150.0, -175.0 + 50.0 * i as f32)));
-        }
-        let mut immovable_blocks = vec![
-            wall.mov(Vec2::new(-500.0, 300.0)),
-            wall.mov(Vec2::new(-500.0, 0.0)),
-            wall.mov(Vec2::new(-500.0, -300.0)),
-            wall.mov(Vec2::new(500.0, 300.0)),
-            wall.mov(Vec2::new(500.0, 0.0)),
-            wall.mov(Vec2::new(500.0, -300.0)),
-        ];
-        blocks.append(&mut immovable_blocks);
+        let mag = match num {
+            0..=4 => 4,
+            n => n,
+        };
+        let layout = Layout::gen(mag, &mut rng);
+        let mut blocks: Vec<Block> = layout
+            .rects
+            .iter()
+            .map(|r| movable.mov(r.pos).siz(r.size))
+            .collect();
         Level {
-            name: "tutorial".to_string(),
-            blocks,
-            point_threshold: 28.0,
+            id: num,
+            back_color,
+            blocks: blocks.clone(),
+            point_threshold: blocks.iter().filter(|b| b.density > 0.0).count() as f32 * 0.8,
             spawnpoint: Vec3::new(0.0, 0.0, 20.0),
             duration: Duration::from_secs(20),
+            color,
         }
     }
 }
@@ -389,30 +472,34 @@ struct Info {
 
 impl Default for Info {
     fn default() -> Self {
-        Self {
-            levels: vec![Level::tutorial()],
-        }
+        Self { levels: vec![] }
     }
 }
 
 impl Info {
-    fn get_level(&self, prog: &Progress) -> Level {
-        self.levels
-            .iter()
-            .find(|l| l.name == prog.current_level)
-            .unwrap()
-            .clone()
+    fn get_level(&mut self, prog: &Progress) -> Level {
+        if let Some(level) = self.levels.iter().find(|l| l.id == prog.current_level) {
+            level.clone()
+        } else {
+            let level = Level::gen(prog.current_level);
+            self.levels.push(level.clone());
+            level
+        }
     }
 }
 
 #[derive(Resource)]
 struct Progress {
-    current_level: String,
+    current_level: u32,
     golden_apples: i32,
     level_complete: bool,
     end_timer: Timer,
     level_timer: Timer,
+    num: u32,
 }
+
+#[derive(Component)]
+struct BlockBase;
 
 #[derive(Component, Clone)]
 struct Block {
@@ -420,6 +507,7 @@ struct Block {
     base_color: Color,
     base_size: Vec2,
     color: Color,
+    color_target: Color,
     max_distance: f32,
     points_mul: f32,
     linear_damping: f32,
@@ -441,6 +529,7 @@ impl Default for Block {
             restitution: 0.3,
             density: 1.0,
             points_mul: 1.0,
+            color_target: Color::RED,
         }
     }
 }
@@ -458,13 +547,17 @@ impl Block {
         moved.base_pos = Vec3::new(pos.x, pos.y, 10.0);
         moved
     }
+
+    fn siz(&self, size: Vec2) -> Block {
+        let mut moved = self.clone();
+        moved.base_size = size;
+        moved
+    }
 }
 
 #[derive(Component)]
 enum AnimationState {
-    Idle,
     Walking,
-    Talking,
     Dashing,
 }
 
@@ -491,7 +584,7 @@ fn animate_sprite(
             timer.0.tick(time.delta() * speed as u32);
             if timer.0.finished() {
                 match anim {
-                    AnimationState::Idle => {
+                    AnimationState::Walking => {
                         sprite.index = (sprite.index + 1) % 4;
                     }
                     _ => (),
@@ -501,16 +594,17 @@ fn animate_sprite(
     }
 }
 
-const ACCELERATION: f32 = 100.0;
-const DASH_BOOST: f32 = 2.0;
+const ACCELERATION: f32 = 50.0;
+const DASH_BOOST: f32 = 2.5;
 
 fn movement(
     mut main_char: Query<(&mut MainCharacter, &Transform, &mut Velocity)>,
-    touches: Res<Touches>,
+    mut touch_input: EventReader<TouchInput>,
     keyboard_input: Res<Input<KeyCode>>,
     mouse_input: Res<Input<MouseButton>>,
     mouse_pos: Res<MousePos>,
     time: Res<Time>,
+    prog: Res<Progress>,
 ) {
     if let Ok((mut main, tr, mut vel)) = main_char.get_single_mut() {
         let pos = Vec2::new(tr.translation.x, tr.translation.y);
@@ -533,10 +627,10 @@ fn movement(
         if mouse_input.pressed(MouseButton::Left) {
             vec_acc += (mouse_pos.world - pos).normalize_or_zero();
         }
-        for touch in touches.iter() {
-            vec_acc += (touch.position() - pos).normalize_or_zero();
+        for touch in touch_input.iter() {
+            vec_acc += (touch.position - pos).normalize_or_zero();
         }
-        vel.linvel += vec_acc.normalize_or_zero() * acc;
+        vel.linvel += vec_acc.normalize_or_zero() * acc * time.delta_seconds() * 60.0;
     }
 }
 
