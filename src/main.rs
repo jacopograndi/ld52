@@ -2,6 +2,7 @@ use rand::{rngs::ThreadRng, Rng};
 use std::time::Duration;
 
 use bevy::{
+    audio::AudioSink,
     diagnostic::{FrameTimeDiagnosticsPlugin, LogDiagnosticsPlugin},
     prelude::*,
     sprite::MaterialMesh2dBundle,
@@ -31,27 +32,10 @@ fn main() {
                 .with_collection::<GameAssets>(),
         )
         .add_state(GameState::AssetLoading)
-        .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
-        //.add_plugin(RapierDebugRenderPlugin::default())
-        .add_startup_system(setup_graphics)
-        .add_startup_system(setup_egui)
-        .add_startup_system(setup_physics)
-        .add_system_set(SystemSet::on_update(GameState::LevelLoading).with_system(setup_level))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(animate_sprite))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(block_color))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(movement))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(check_finish))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(show_level_progress))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(mass_increase))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(attract))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(explode))
-        .add_system_set(SystemSet::on_exit(GameState::Gameplay).with_system(teardown_level))
-        .add_system(mouse_pos)
-        .add_system(reset_chroma)
-        .add_plugin(EguiPlugin)
         .insert_resource(Msaa { samples: 1 })
         .init_resource::<Info>()
         .init_resource::<MousePos>()
+        .init_resource::<Soundtrack>()
         .insert_resource(Progress {
             current_level: 1,
             golden_apples: 0,
@@ -68,6 +52,27 @@ fn main() {
             magnitude_b: 0.0,
             ..default()
         })
+        .add_plugin(RapierPhysicsPlugin::<NoUserData>::pixels_per_meter(100.0))
+        //.add_plugin(RapierDebugRenderPlugin::default())
+        .add_startup_system(setup_graphics)
+        .add_startup_system(setup_egui)
+        .add_startup_system(setup_physics)
+        //.add_system_set(SystemSet::on_exit(GameState::AssetLoading).with_system(setup_audio))
+        .add_system_set(SystemSet::on_update(GameState::LevelLoading).with_system(setup_level))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(animate_sprite))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(block_color))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(movement))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(check_finish))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(show_level_progress))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(mass_increase))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(attract))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(explode))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(audio_volumes))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(hit_fx))
+        .add_system_set(SystemSet::on_exit(GameState::Gameplay).with_system(teardown_level))
+        .add_system(mouse_pos)
+        .add_system(reset_chroma)
+        .add_plugin(EguiPlugin)
         .run();
 }
 
@@ -82,6 +87,12 @@ struct GameAssets {
     #[asset(texture_atlas(tile_size_x = 64., tile_size_y = 64., columns = 4, rows = 4))]
     #[asset(path = "sheet.png")]
     lolle: Handle<TextureAtlas>,
+    #[asset(path = "hi.ogg")]
+    hi: Handle<AudioSource>,
+    #[asset(path = "lo.ogg")]
+    lo: Handle<AudioSource>,
+    #[asset(path = "hit.ogg")]
+    hit: Handle<AudioSource>,
 }
 
 #[derive(Clone, Eq, PartialEq, Debug, Hash)]
@@ -135,11 +146,42 @@ fn place_block(commands: &mut Commands, block: Block) {
         })
         .insert(Restitution::coefficient(block.restitution))
         .insert(ColliderMassProperties::Density(block.density))
+        .insert(ActiveEvents::CONTACT_FORCE_EVENTS)
         .insert(Velocity {
             linvel: Vec2::ZERO,
             angvel: 0.0,
         })
         .insert(RigidBody::Dynamic);
+}
+
+#[derive(Resource, Default)]
+struct Soundtrack {
+    hi: Handle<AudioSink>,
+    lo: Handle<AudioSink>,
+}
+
+fn setup_audio(
+    my_assets: Res<GameAssets>,
+    audio_sinks: Res<Assets<AudioSink>>,
+    audio: Res<Audio>,
+    mut sinks: ResMut<Soundtrack>,
+) {
+    sinks.hi = audio_sinks.get_handle(audio.play_with_settings(
+        my_assets.hi.clone(),
+        PlaybackSettings {
+            repeat: true,
+            volume: 0.1,
+            ..default()
+        },
+    ));
+    sinks.lo = audio_sinks.get_handle(audio.play_with_settings(
+        my_assets.lo.clone(),
+        PlaybackSettings {
+            repeat: true,
+            volume: 0.1,
+            ..default()
+        },
+    ));
 }
 
 fn setup_physics(mut commands: Commands, mut rapier_conf: ResMut<RapierConfiguration>) {
@@ -388,6 +430,25 @@ fn block_color(mut block_query: Query<(&Block, &Transform, &mut Sprite)>) {
         let amt = block.rel(tr.translation);
         let lerp = block.color * (1.0 - amt) + block.color_target * amt;
         sprite.color = lerp;
+    }
+}
+
+fn hit_fx(
+    my_assets: Res<GameAssets>,
+    audio: Res<Audio>,
+    mut impact_events: EventReader<ContactForceEvent>,
+) {
+    for ev in impact_events.iter() {
+        if ev.max_force_magnitude > 1.0 {
+            audio.play_with_settings(
+                my_assets.hit.clone(),
+                PlaybackSettings {
+                    repeat: false,
+                    volume: 0.3,
+                    ..default()
+                },
+            );
+        }
     }
 }
 
@@ -816,6 +877,24 @@ fn animate_sprite(
                     sprite.index = (sprite.index + 1) % 4;
                 }
             }
+        }
+    }
+}
+
+fn audio_volumes(
+    main_query: Query<(&Velocity, &MainCharacter)>,
+    sinks: Res<Soundtrack>,
+    audio_sinks: Res<Assets<AudioSink>>,
+) {
+    if let Ok((vel, _)) = main_query.get_single() {
+        let speed = (vel.linvel.length() * 0.001).min(1.0);
+        let amt = speed;
+
+        if let Some(sink) = audio_sinks.get(&sinks.hi) {
+            sink.set_volume(amt * 0.2);
+        }
+        if let Some(sink) = audio_sinks.get(&sinks.lo) {
+            sink.set_volume((1.0 - amt) * 0.2);
         }
     }
 }
