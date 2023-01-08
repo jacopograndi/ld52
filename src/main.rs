@@ -68,7 +68,6 @@ fn main() {
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(attract))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(explode))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(audio_volumes))
-        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(hit_fx))
         .add_system_set(SystemSet::on_exit(GameState::Gameplay).with_system(teardown_level))
         .add_system(mouse_pos)
         .add_system(reset_chroma)
