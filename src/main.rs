@@ -10,7 +10,8 @@ use bevy_asset_loader::prelude::*;
 use bevy_egui::{egui, EguiContext, EguiPlugin, EguiSettings};
 use bevy_rapier2d::prelude::*;
 use bevy_vfx_bag::{
-    image::chromatic_aberration::ChromaticAberrationPlugin, BevyVfxBagPlugin, PostProcessingInput,
+    image::chromatic_aberration::{ChromaticAberration, ChromaticAberrationPlugin},
+    BevyVfxBagPlugin, PostProcessingInput,
 };
 
 fn main() {
@@ -42,8 +43,11 @@ fn main() {
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(check_finish))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(show_level_progress))
         .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(mass_increase))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(attract))
+        .add_system_set(SystemSet::on_update(GameState::Gameplay).with_system(explode))
         .add_system_set(SystemSet::on_exit(GameState::Gameplay).with_system(teardown_level))
         .add_system(mouse_pos)
+        .add_system(reset_chroma)
         .add_plugin(EguiPlugin)
         .insert_resource(Msaa { samples: 1 })
         .init_resource::<Info>()
@@ -52,19 +56,30 @@ fn main() {
             current_level: 1,
             golden_apples: 0,
             level_complete: false,
-            end_timer: Timer::from_seconds(5.0, TimerMode::Once),
+            end_timer: Timer::from_seconds(3.0, TimerMode::Once),
             level_timer: Timer::from_seconds(20.0, TimerMode::Once),
-            num: 1,
         })
         .insert_resource(ClearColor(Color::BLACK))
-        //.add_plugin(BevyVfxBagPlugin) // This needs to be added for any effect to work
-        //.add_plugin(ChromaticAberrationPlugin)
+        .add_plugin(BevyVfxBagPlugin) // This needs to be added for any effect to work
+        .add_plugin(ChromaticAberrationPlugin)
+        .insert_resource(ChromaticAberration {
+            magnitude_r: 0.0,
+            magnitude_g: 0.0,
+            magnitude_b: 0.0,
+            ..default()
+        })
         .run();
+}
+
+fn reset_chroma(mut chroma: ResMut<ChromaticAberration>, time: Res<Time>) {
+    chroma.magnitude_r *= 0.8;
+    chroma.magnitude_g *= 0.8;
+    chroma.magnitude_b *= 0.8;
 }
 
 #[derive(AssetCollection, Resource)]
 struct GameAssets {
-    #[asset(texture_atlas(tile_size_x = 64., tile_size_y = 64., columns = 4, rows = 1))]
+    #[asset(texture_atlas(tile_size_x = 64., tile_size_y = 64., columns = 4, rows = 4))]
     #[asset(path = "sheet.png")]
     lolle: Handle<TextureAtlas>,
 }
@@ -77,9 +92,9 @@ enum GameState {
 }
 
 fn setup_graphics(mut commands: Commands) {
-    commands
-        .spawn(Camera2dBundle::default())
-        .insert(PostProcessingInput);
+    let mut camera = Camera2dBundle::default();
+    camera.projection.scale = 0.666;
+    commands.spawn(camera).insert(PostProcessingInput);
 }
 
 fn place_block(commands: &mut Commands, block: Block) {
@@ -120,6 +135,10 @@ fn place_block(commands: &mut Commands, block: Block) {
         })
         .insert(Restitution::coefficient(block.restitution))
         .insert(ColliderMassProperties::Density(block.density))
+        .insert(Velocity {
+            linvel: Vec2::ZERO,
+            angvel: 0.0,
+        })
         .insert(RigidBody::Dynamic);
 }
 
@@ -194,9 +213,10 @@ fn setup_level(
         })
         .insert(ActiveEvents::COLLISION_EVENTS)
         .insert(ActiveEvents::CONTACT_FORCE_EVENTS)
-        .insert(AnimationState::Walking)
         .insert(MainCharacter {
             dash_timer: Timer::from_seconds(1.0, TimerMode::Once),
+            attract_timer: Timer::from_seconds(0.5, TimerMode::Once),
+            explode_timer: Timer::from_seconds(0.8, TimerMode::Once),
         })
         .insert(TransformBundle::from(Transform::from_translation(
             level.spawnpoint,
@@ -253,11 +273,11 @@ fn check_finish(
             .sum();
         let level = info.get_level(&prog);
         prog.level_timer.tick(time.delta());
-        if sum >= level.point_threshold || prog.level_timer.finished() {
-            prog.num += 1;
+        if sum >= level.point_threshold {
             if !prog.level_timer.finished() {
                 prog.golden_apples += 1;
             }
+            prog.current_level += 1;
             prog.level_complete = true;
             prog.end_timer.reset();
             /*
@@ -271,7 +291,6 @@ fn check_finish(
                 + 1)
                 % info.levels.len();
             */
-            prog.current_level += 1;
         }
     } else {
         prog.end_timer.tick(time.delta());
@@ -310,19 +329,43 @@ fn show_level_progress(
         .show(egui_context.ctx_mut(), |ui| {
             ui.visuals_mut().selection.bg_fill = color;
             if progress < 1.0 && !prog.level_complete {
-                let progress_bar = egui::ProgressBar::new(progress)
-                    .show_percentage()
-                    .text(format!("{:.0}% of level {}", progress * 100.0, prog.num));
+                let progress_bar =
+                    egui::ProgressBar::new(progress)
+                        .show_percentage()
+                        .text(format!(
+                            "{:}% of level {}",
+                            (progress * 100.0) as i32,
+                            prog.current_level
+                        ));
                 ui.add(progress_bar);
             } else {
                 if !prog.level_timer.finished() {
-                    ui.label("You won a golden apple!");
+                    ui.label(format!(
+                        "You won a golden apple! You now have {}",
+                        prog.golden_apples
+                    ));
                 } else {
                     ui.label("Not fast enough!");
                 }
-                ui.label(format!("You have {} golden apples.", prog.golden_apples));
             }
         });
+    if !prog.end_timer.finished() && prog.level_complete {
+        if [5, 10, 15].contains(&prog.golden_apples) {
+            egui::Window::new("UpgProgress")
+                .title_bar(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, egui::Vec2::splat(0.0))
+                .show(egui_context.ctx_mut(), |ui| {
+                    let text = match prog.golden_apples {
+                        5 => "You have unlocked Dash! [Space]",
+                        10 => "You have unlocked Magnet! [J]",
+                        15 => "You have unlocked Dynamite! [K]",
+                        _ => "Level passed",
+                    };
+                    ui.label(text);
+                });
+        }
+    }
     egui::Window::new("TimeProgress")
         .title_bar(false)
         .resizable(false)
@@ -330,8 +373,12 @@ fn show_level_progress(
         .show(egui_context.ctx_mut(), |ui| {
             ui.visuals_mut().selection.bg_fill = color;
 
-            let progress_bar =
-                egui::ProgressBar::new(1.0 - prog.level_timer.percent()).text("Time left");
+            let text = if prog.level_timer.finished() {
+                "Not fast enough for a golden apple."
+            } else {
+                "Time left"
+            };
+            let progress_bar = egui::ProgressBar::new(1.0 - prog.level_timer.percent()).text(text);
             ui.add(progress_bar);
         });
 }
@@ -355,7 +402,7 @@ struct Level {
     color: Color,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 struct Rect {
     pos: Vec2,
     size: Vec2,
@@ -367,17 +414,30 @@ struct Layout {
 }
 
 impl Layout {
-    fn gen(mag: u32, mut rng: &mut ThreadRng) -> Layout {
+    fn gen_quarter(mag: u32, rng: &mut ThreadRng, walls_prob: f32) -> Layout {
         let mut layout = Layout { rects: vec![] };
-        for i in 0..mag {
+        for _ in 0..mag {
             // generate random box size
-            let size = Vec2::new(rng.gen_range(20.0..60.0), rng.gen_range(20.0..60.0));
+            let size = if rng.gen_bool(1.0 - walls_prob as f64) {
+                Vec2::new(
+                    rng.gen_range(2..10) as f32 * 5.0,
+                    rng.gen_range(2..10) as f32 * 5.0,
+                )
+            } else {
+                let long = rng.gen_range(15..25) as f32 * 5.0;
+                let short = rng.gen_range(3..10) as f32 * 5.0;
+                if rng.gen_bool(0.5) {
+                    Vec2::new(long, short)
+                } else {
+                    Vec2::new(short, long)
+                }
+            };
 
             // select a direction (along x or y)
-            let dir = if rng.gen_bool(0.5) {
-                Vec2::new(1.0, 0.0)
+            let (dir, perp) = if rng.gen_bool(0.5) {
+                (Vec2::new(1.0, 0.0), Vec2::new(0.0, 1.0))
             } else {
-                Vec2::new(0.0, 1.0)
+                (Vec2::new(0.0, 1.0), Vec2::new(1.0, 0.0))
             };
 
             // generate a random offset from 0..max * 2
@@ -389,7 +449,8 @@ impl Layout {
             let max = (maxvec * dir).length();
             let off = dir
                 * if max > 0.0 {
-                    rng.gen_range(0.0..max)
+                    let stepped = (max / 5.0) as i32;
+                    rng.gen_range(0..stepped) as f32 * 5.0
                 } else {
                     0.0
                 };
@@ -399,33 +460,187 @@ impl Layout {
                 pos: off * dir,
                 size,
             };
-            let casted = layout.cast(&(dir * off), &dir, &rect);
+            let casted = layout.cast(&(dir * off), &perp, &rect);
 
             layout.rects.push(casted);
 
             // mirror along x and y
         }
-        layout
+        layout.drag(0, &Vec2::new(1.0, 0.0), 40.0);
+        layout.drag(0, &Vec2::new(0.0, 1.0), 40.0);
+        for _ in 0..5 {
+            let dir = if rng.gen_bool(0.5) {
+                Vec2::new(1.0, 0.0)
+            } else {
+                Vec2::new(0.0, 1.0)
+            };
+            let dist = rng.gen_range(2..6) as f32 * 5.0;
+            layout.drag(rng.gen_range(0..layout.rects.len()), &dir, dist);
+        }
+        layout.clip_oob(&Vec2::new(350.0, 290.0))
     }
 
-    fn intersects(&self, rect: &Rect) -> bool {
-        self.rects.iter().any(|r| {
-            r.pos.x < rect.pos.x + rect.size.x
-                && rect.size.x < r.pos.x + r.size.x
-                && r.pos.y < rect.pos.y + rect.size.y
-                && rect.size.y < r.pos.y + r.size.y
-        })
+    fn gen(mag: u32, rng: &mut ThreadRng, walls_prob: f32) -> Layout {
+        let mut layout = Layout::gen_quarter(mag, rng, walls_prob);
+        let stamp = layout.clone();
+        layout = layout.merge(&stamp.mirror_x());
+        layout = layout.merge(&stamp.mirror_y());
+        layout = layout.merge(&stamp.mirror_y().mirror_x());
+        layout.character_hole(32.0)
+    }
+
+    fn drag(&mut self, rect_i: usize, dir: &Vec2, distance: f32) {
+        let mut dragging = vec![rect_i];
+        for _ in 0..distance as i32 {
+            let movevec = dir.clone();
+            for _ in 0..100 {
+                let mut pushed = vec![];
+                for drag in dragging.iter() {
+                    let mut moved = self.rects[*drag].clone();
+                    moved.pos += movevec;
+                    let mut inters: Vec<usize> = self
+                        .rects
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, r)| Layout::intersects(r, &moved))
+                        .map(|(j, _)| j)
+                        .collect();
+                    pushed.append(&mut inters);
+                }
+                let mut finished = true;
+                for p in pushed.iter() {
+                    if !dragging.contains(p) {
+                        dragging.push(*p);
+                        finished = false;
+                    }
+                }
+                if finished {
+                    break;
+                }
+            }
+            for drag in dragging.iter() {
+                self.rects[*drag].pos += movevec;
+            }
+        }
+    }
+
+    fn clip_oob(&self, oob: &Vec2) -> Layout {
+        Layout {
+            rects: self
+                .rects
+                .iter()
+                .filter(|r| {
+                    !Layout::intersects(
+                        r,
+                        &Rect {
+                            pos: Vec2::new(0.0, oob.y),
+                            size: *oob,
+                        },
+                    ) && !Layout::intersects(
+                        r,
+                        &Rect {
+                            pos: Vec2::new(oob.x, 0.0),
+                            size: *oob,
+                        },
+                    )
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn character_hole(&self, rad: f32) -> Layout {
+        Layout {
+            rects: self
+                .rects
+                .iter()
+                .filter(|r| {
+                    r.pos.length() > rad
+                        && (r.pos + r.size).length() > rad
+                        && (r.pos + r.size * Vec2::new(0.0, 1.0)).length() > rad
+                        && (r.pos + r.size * Vec2::new(1.0, 0.0)).length() > rad
+                })
+                .cloned()
+                .collect(),
+        }
+    }
+
+    fn merge(&self, oth: &Layout) -> Layout {
+        let mut rects = self.rects.clone();
+        let mut othrects = oth.rects.clone();
+        rects.append(&mut othrects);
+        Layout { rects }
+    }
+
+    fn mirror_x(&self) -> Layout {
+        Layout {
+            rects: self
+                .rects
+                .iter()
+                .map(|r| {
+                    let topleft = (r.pos + r.size) * Vec2::new(-1.0, 1.0);
+                    let bottomleft = topleft - r.size * Vec2::new(0.0, 1.0);
+                    Rect {
+                        pos: bottomleft,
+                        size: r.size,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn mirror_y(&self) -> Layout {
+        Layout {
+            rects: self
+                .rects
+                .iter()
+                .map(|r| {
+                    let bottomright = (r.pos + r.size) * Vec2::new(1.0, -1.0);
+                    let bottomleft = bottomright - r.size * Vec2::new(1.0, 0.0);
+                    Rect {
+                        pos: bottomleft,
+                        size: r.size,
+                    }
+                })
+                .collect(),
+        }
+    }
+
+    fn intersects(r: &Rect, rect: &Rect) -> bool {
+        r.pos.x < rect.pos.x + rect.size.x
+            && rect.pos.x < r.pos.x + r.size.x
+            && r.pos.y < rect.pos.y + rect.size.y
+            && rect.pos.y < r.pos.y + r.size.y
     }
 
     fn cast(&self, start: &Vec2, dir: &Vec2, rect: &Rect) -> Rect {
-        let mut pos = start.clone() + (dir.clone() * (self.rects.len() as f32 * 50.0));
-        for r in self.rects.iter() {
-            //r.pos * dir
+        let mut min = Vec2::new(0.0, 0.0);
+        for i in 0..100 {
+            for r in self.rects.iter() {
+                let sample = r.pos * dir.clone();
+                if (sample * dir.clone()).length() > min.length() {
+                    min = sample;
+                    break;
+                }
+                let sample = (r.pos + r.size) * dir.clone();
+                if (sample * dir.clone()).length() > min.length() {
+                    min = sample;
+                    break;
+                }
+            }
+            let casted = Rect {
+                pos: min + start.clone(),
+                size: rect.size.clone(),
+            };
+            if !self.rects.iter().any(|r| Layout::intersects(r, &casted)) {
+                return casted;
+            }
         }
-        Rect {
+        let mut pos = start.clone() + (dir.clone() * (self.rects.len() as f32 * 50.0));
+        return Rect {
             pos,
             size: rect.size.clone(),
-        }
+        };
     }
 }
 
@@ -435,31 +650,48 @@ impl Level {
         let hue: f32 = rng.gen_range(0.0..360.0);
         let color = Color::hsl(hue, 1.0, 0.5);
         let target_color = Color::hsl((hue + 137.0).clamp(0.0, 360.0), 1.0, 0.5);
+        let wall_color = Color::hsl((hue + 137.0 * 2.0).clamp(0.0, 360.0), 0.5, 0.4);
         let back_color = Color::hsl(0.0, 0.0, 0.1);
         let movable = Block {
             color,
-            base_size: Vec2::new(30.0, 30.0),
             base_color: color * 0.7,
             color_target: target_color,
             ..default()
         };
-        let mag = match num {
-            0..=4 => 4,
-            n => n,
+        let wall = Block {
+            color: wall_color,
+            base_color: wall_color,
+            color_target: target_color,
+            density: 0.0,
+            ..default()
         };
-        let layout = Layout::gen(mag, &mut rng);
-        let mut blocks: Vec<Block> = layout
+        let (mag, walls_prob) = match num {
+            1..=2 => (5, 0.0),
+            3..=6 => (10, 0.03),
+            7..=15 => (20, 0.06),
+            n => ((n * 2).max(40), 0.1),
+        };
+        let layout = Layout::gen(mag, &mut rng, walls_prob);
+        let blocks: Vec<Block> = layout
             .rects
             .iter()
-            .map(|r| movable.mov(r.pos).siz(r.size))
+            .map(|r| {
+                if r.size.length() >= 15.0 * 5.0 {
+                    wall.mov(r.pos + r.size * 0.5).siz(r.size)
+                } else {
+                    movable.mov(r.pos + r.size * 0.5).siz(r.size)
+                }
+            })
             .collect();
+        let blocknum = blocks.iter().filter(|b| b.density > 0.0).count();
+        let wallnum = blocks.iter().filter(|b| b.density == 0.0).count();
         Level {
             id: num,
             back_color,
             blocks: blocks.clone(),
-            point_threshold: blocks.iter().filter(|b| b.density > 0.0).count() as f32 * 0.8,
+            point_threshold: blocknum as f32 * 0.76,
             spawnpoint: Vec3::new(0.0, 0.0, 20.0),
-            duration: Duration::from_secs(20),
+            duration: Duration::from_secs((blocknum + wallnum * 5) as u64),
             color,
         }
     }
@@ -495,7 +727,6 @@ struct Progress {
     level_complete: bool,
     end_timer: Timer,
     level_timer: Timer,
-    num: u32,
 }
 
 #[derive(Component)]
@@ -555,15 +786,11 @@ impl Block {
     }
 }
 
-#[derive(Component)]
-enum AnimationState {
-    Walking,
-    Dashing,
-}
-
-#[derive(Component)]
+#[derive(Component, Debug)]
 struct MainCharacter {
     dash_timer: Timer,
+    attract_timer: Timer,
+    explode_timer: Timer,
 }
 
 #[derive(Component)]
@@ -571,30 +798,133 @@ struct AnimationTimer(Timer);
 
 fn animate_sprite(
     time: Res<Time>,
-    mut query: Query<(
-        &mut AnimationTimer,
-        &mut TextureAtlasSprite,
-        &AnimationState,
-    )>,
+    mut query: Query<(&mut AnimationTimer, &mut TextureAtlasSprite)>,
     main_query: Query<(&Velocity, &MainCharacter)>,
 ) {
-    if let Ok((vel, _)) = main_query.get_single() {
-        for (mut timer, mut sprite, anim) in &mut query {
-            let speed = vel.linvel.length().min(1.0);
-            timer.0.tick(time.delta() * speed as u32);
-            if timer.0.finished() {
-                match anim {
-                    AnimationState::Walking => {
-                        sprite.index = (sprite.index + 1) % 4;
-                    }
-                    _ => (),
+    if let Ok((vel, main)) = main_query.get_single() {
+        for (mut timer, mut sprite) in &mut query {
+            if !main.attract_timer.finished() && main.attract_timer.percent() < 0.25 {
+                sprite.index = 8;
+            } else if !main.explode_timer.finished() && main.explode_timer.percent() < 0.25 {
+                sprite.index = 12;
+            } else if !main.dash_timer.finished() && main.dash_timer.percent() < 0.25 {
+                sprite.index = 4;
+            } else {
+                let speed = vel.linvel.length().min(1.0);
+                timer.0.tick(time.delta() * speed as u32);
+                if timer.0.finished() {
+                    sprite.index = (sprite.index + 1) % 4;
                 }
             }
         }
     }
 }
 
+const EXPLODE_COST: i32 = 15;
+const EXPLODE_POWER: f32 = 100000.0;
+
+fn explode(
+    mut main_char: Query<(&mut MainCharacter, &Transform), (Without<Block>, With<MainCharacter>)>,
+    mut block_query: Query<
+        (&Block, &Transform, &mut Velocity, &ColliderMassProperties),
+        (Without<MainCharacter>, With<Block>),
+    >,
+    keyboard_input: Res<Input<KeyCode>>,
+    time: Res<Time>,
+    prog: Res<Progress>,
+    mut chroma: ResMut<ChromaticAberration>,
+) {
+    if let Ok((mut main, mtr)) = main_char.get_single_mut() {
+        main.explode_timer.tick(time.delta());
+        if main.explode_timer.finished()
+            && keyboard_input.pressed(KeyCode::J)
+            && prog.golden_apples >= EXPLODE_COST
+        {
+            main.explode_timer.reset();
+            let mut affected = Vec2::new(0.0, 0.0);
+            for (_, btr, mut v, coll) in block_query.iter_mut() {
+                match coll {
+                    ColliderMassProperties::Density(d) => {
+                        if d == &0.0 {
+                            continue;
+                        }
+                    }
+                    _ => (),
+                }
+                let delta = mtr.translation - btr.translation;
+                let delta = Vec2::new(delta.x, delta.y);
+                let mag = delta.length();
+                if mag > 20.0 && mag < 100.0 {
+                    let pow = -delta
+                        * (1.0 / (mag * mag))
+                        * (time.delta_seconds() * 60.0)
+                        * EXPLODE_POWER;
+                    v.linvel += pow;
+                    affected += pow;
+                }
+            }
+            let amt = (affected / 500.0).length().min(0.5);
+            chroma.magnitude_r += 0.02 * amt;
+            chroma.magnitude_g += 0.02 * amt;
+            chroma.magnitude_b += 0.02 * amt;
+            chroma.dir_r += Vec2::new(1.0, 0.0);
+            chroma.dir_g += Vec2::new(1.0, 1.0).normalize();
+            chroma.dir_b += Vec2::new(-1.0, 1.0).normalize();
+        }
+    }
+}
+
+const ATTRACT_COST: i32 = 10;
+const ATTRACT_POWER: f32 = 1000.0;
+
+fn attract(
+    mut main_char: Query<(&mut MainCharacter, &Transform), (Without<Block>, With<MainCharacter>)>,
+    mut block_query: Query<
+        (&Block, &Transform, &mut Velocity, &ColliderMassProperties),
+        (Without<MainCharacter>, With<Block>),
+    >,
+    keyboard_input: Res<Input<KeyCode>>,
+    time: Res<Time>,
+    prog: Res<Progress>,
+    mut chroma: ResMut<ChromaticAberration>,
+) {
+    if let Ok((mut main, mtr)) = main_char.get_single_mut() {
+        main.attract_timer.tick(time.delta());
+        if keyboard_input.pressed(KeyCode::K) && prog.golden_apples >= ATTRACT_COST {
+            main.attract_timer.reset();
+            let mut affected = Vec2::new(0.0, 0.0);
+            for (_, btr, mut v, coll) in block_query.iter_mut() {
+                match coll {
+                    ColliderMassProperties::Density(d) => {
+                        if d == &0.0 {
+                            continue;
+                        }
+                    }
+                    _ => (),
+                }
+                let delta = mtr.translation - btr.translation;
+                let delta = Vec2::new(delta.x, delta.y);
+                let mag = delta.length();
+                if mag > 20.0 && mag < 100.0 {
+                    let pow =
+                        delta * (1.0 / (mag * mag)) * (time.delta_seconds() * 60.0) * ATTRACT_POWER;
+                    v.linvel += pow;
+                    affected += pow;
+                }
+            }
+            let amt = (affected / 1000.0).length().min(0.1);
+            chroma.magnitude_r += 0.02 * amt;
+            chroma.magnitude_g += 0.02 * amt;
+            chroma.magnitude_b += 0.02 * amt;
+            chroma.dir_r += Vec2::new(1.0, 0.0);
+            chroma.dir_g += Vec2::new(1.0, 1.0).normalize();
+            chroma.dir_b += Vec2::new(-1.0, 1.0).normalize();
+        }
+    }
+}
+
 const ACCELERATION: f32 = 50.0;
+const DASH_COST: i32 = 5;
 const DASH_BOOST: f32 = 2.5;
 
 fn movement(
@@ -605,15 +935,19 @@ fn movement(
     mouse_pos: Res<MousePos>,
     time: Res<Time>,
     prog: Res<Progress>,
+    mut chroma: ResMut<ChromaticAberration>,
 ) {
     if let Ok((mut main, tr, mut vel)) = main_char.get_single_mut() {
         let pos = Vec2::new(tr.translation.x, tr.translation.y);
         let mut acc = ACCELERATION;
         main.dash_timer.tick(time.delta());
         if main.dash_timer.finished() {
-            if keyboard_input.pressed(KeyCode::Space) {
+            if keyboard_input.pressed(KeyCode::Space) && prog.golden_apples >= DASH_COST {
                 main.dash_timer.reset();
                 acc *= DASH_BOOST * 2.0;
+                chroma.magnitude_r += 0.002;
+                chroma.magnitude_g += 0.0002;
+                chroma.magnitude_b += 0.0002;
             }
         } else if main.dash_timer.percent() < 0.25 {
             acc *= DASH_BOOST;
@@ -630,7 +964,22 @@ fn movement(
         for touch in touch_input.iter() {
             vec_acc += (touch.position - pos).normalize_or_zero();
         }
+
         vel.linvel += vec_acc.normalize_or_zero() * acc * time.delta_seconds() * 60.0;
+
+        if main.dash_timer.percent() < 0.25 {
+            chroma.magnitude_r += 0.002;
+            chroma.magnitude_g += 0.0002;
+            chroma.magnitude_b += 0.0002;
+        }
+        let len = vel.linvel.length();
+        let mut normcut = vel.linvel;
+        if len > 1.0 {
+            normcut = vel.linvel.normalize_or_zero();
+        }
+        chroma.dir_r = -normcut;
+        chroma.dir_g = normcut.perp();
+        chroma.dir_b = -normcut.perp();
     }
 }
 
